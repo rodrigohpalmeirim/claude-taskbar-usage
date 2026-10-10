@@ -15,7 +15,7 @@ A small Windows 11/10 widget that shows your Claude rate limits right in the tas
 | --- | --- |
 | ![Right-click menu with the Show submenu](docs/menu.png) | ![Minimal layout](docs/minimal.png) |
 
-Inspired by [usage-monitor-for-claude](https://github.com/jens-duttke/usage-monitor-for-claude), and uses the same data source: the OAuth token Claude Code stores in `%USERPROFILE%\.claude\.credentials.json` (or `CLAUDE_CONFIG_DIR`) and `https://api.anthropic.com/api/oauth/usage`. That is the only host it talks to, and the token is only ever sent in the Authorization header.
+Inspired by [usage-monitor-for-claude](https://github.com/jens-duttke/usage-monitor-for-claude), and uses the same data source: the OAuth token Claude Code stores in `%USERPROFILE%\.claude\.credentials.json` (or `CLAUDE_CONFIG_DIR`) and `https://api.anthropic.com/api/oauth/usage`. The token is only ever sent to `api.anthropic.com`, in the Authorization header. The only other host it contacts is GitHub, for the [update check](#updates).
 
 ## Download
 
@@ -56,6 +56,7 @@ On Windows 11 the taskbar app icons are drawn *above* other windows, so keep the
 | `show_reset_time` | `true` | Reset time (`14:59` / `Fri 21:00`) |
 | `warn_when_outpacing` | `true` | Red bar when usage runs ahead of elapsed time |
 | `theme` | `"auto"` | `auto`, `dark` (light text) or `light` (dark text) |
+| `check_updates` | `true` | Check GitHub once a day for a new release (also in the right-click menu) |
 | `poll_seconds` | `180` | API poll interval while you're at the computer (min 60) |
 | `idle_poll_seconds` | `900` | Poll interval after 5 minutes without input |
 | `offset` | `0` | Distance from the tray icons; set by dragging |
@@ -63,6 +64,16 @@ On Windows 11 the taskbar app icons are drawn *above* other windows, so keep the
 Polling also happens right after a reset, every 2 minutes while session usage is climbing, and backs off on errors / HTTP 429. If the token has expired, the widget runs `claude update` (at most every 30 minutes) to renew it, like usage-monitor-for-claude does.
 
 A log of the current run is written to `%LOCALAPPDATA%\ClaudeTaskbarUsage\widget.log`.
+
+## Updates
+
+Once a day (and 30 seconds after start) the widget asks the GitHub API for the latest release of this repository. That request carries no account data, only a `ClaudeTaskbarUsage/<version>` User-Agent. When a newer version exists, a small dot appears in the widget's corner, the tooltip says so, and the right-click menu offers **Update to vX.Y.Z**. Clicking it:
+
+1. downloads the new `ClaudeTaskbarUsage.exe` and its `.sha256` from the release,
+2. checks the SHA-256 and refuses the file if it doesn't match,
+3. moves the running exe aside, puts the new one in its place (same path, so **Start with Windows** keeps working) and restarts.
+
+If the folder isn't writable (e.g. you put the exe in `Program Files`), it says so and opens the release page instead. Turn the check off with right-click → **Check for updates daily**, or `"check_updates": false`.
 
 Command-line flags: `--demo` shows sample data without calling the API; `--overlay` draws the widget as a topmost window over the taskbar instead of docking into it (automatic fallback if docking fails).
 

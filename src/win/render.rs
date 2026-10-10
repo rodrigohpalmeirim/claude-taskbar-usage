@@ -61,6 +61,8 @@ pub struct View<'a> {
     pub stale: bool,
     pub hover: bool,
     pub light: bool,
+    /// Small dot in the corner: an update is available.
+    pub update_dot: bool,
     pub cfg: &'a Config,
     pub locale: &'a dyn Locale,
 }
@@ -391,6 +393,12 @@ impl Renderer {
         }
         self.draw_texts(&texts, false, pal.text);
         self.draw_texts(&texts, true, pal.dim);
+
+        if v.update_dot {
+            let r = (2.0 * s).round().max(2.0);
+            let (cx, cy) = (w - (4.0 * s).round(), (7.0 * s).round());
+            self.fill_shape(cx - r, cy - r, cx + r, cy + r, r, w, pal.fill);
+        }
 
         // Stale data is shown faded. Every pixel keeps a minimal alpha so
         // the whole rectangle stays clickable (fully transparent pixels let

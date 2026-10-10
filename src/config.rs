@@ -31,6 +31,8 @@ pub struct Config {
     pub warn_when_outpacing: bool,
     /// "auto" (follow Windows), "dark" (light text) or "light" (dark text).
     pub theme: String,
+    /// Check GitHub once a day for a newer release.
+    pub check_updates: bool,
 }
 
 impl Default for Config {
@@ -51,6 +53,7 @@ impl Default for Config {
             show_reset_time: true,
             warn_when_outpacing: true,
             theme: "auto".into(),
+            check_updates: true,
         }
     }
 }

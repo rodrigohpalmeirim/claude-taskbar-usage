@@ -5,9 +5,10 @@
 
 use super::locale::WinLocale;
 use super::render::{Layout, Renderer, View, format_percent};
-use super::{cli, http, wide};
+use super::{cli, http, updater, wide};
 use crate::config::{Config, TOGGLES, toggle_locked, toggle_value};
 use crate::timefmt::{self, Locale};
+use crate::update::Release;
 use crate::usage::{FetchError, Usage, demo_usage, parse_usage};
 use std::cell::RefCell;
 use std::fmt::Write as _;
@@ -29,15 +30,16 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 use windows_sys::w;
 
 const APP_NAME: &str = "Claude Taskbar Usage";
-const VERSION: &str = env!("CARGO_PKG_VERSION");
+const VERSION: &str = updater::VERSION;
 const CLASS: windows_sys::core::PCWSTR = w!("ClaudeTaskbarUsageWidget");
 const RUN_KEY: windows_sys::core::PCWSTR = w!(r"Software\Microsoft\Windows\CurrentVersion\Run");
 const RUN_VALUE: windows_sys::core::PCWSTR = w!("ClaudeTaskbarUsage");
 const USAGE_PAGE: &str = "https://claude.ai/settings/usage";
-const API_HOST: &str = "api.anthropic.com";
-const API_PATH: &str = "/api/oauth/usage";
+const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 
 const WM_APP_DATA: u32 = WM_APP + 1;
+/// An update install finished (successfully or not).
+const WM_APP_UPDATED: u32 = WM_APP + 2;
 const TIMER_HOUSEKEEPING: usize = 1;
 
 const CMD_REFRESH: u32 = 1;
@@ -46,13 +48,15 @@ const CMD_AUTOSTART: u32 = 3;
 const CMD_RESET_POS: u32 = 4;
 const CMD_SETTINGS: u32 = 5;
 const CMD_EXIT: u32 = 6;
+const CMD_UPDATE: u32 = 7;
+const CMD_CHECK_UPDATES: u32 = 8;
 const CMD_TOGGLE_BASE: u32 = 100;
 
 fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
 }
 
-/// State shared with the polling thread.
+/// State shared with the polling and update threads.
 #[derive(Default)]
 struct Shared {
     usage: Option<Usage>,
@@ -61,6 +65,16 @@ struct Shared {
     last_short: &'static str,
     last_attempt: i64,
     version: u64,
+    /// Mirrors `Config::check_updates` for the update thread.
+    check_updates: bool,
+    /// When the update thread checks next (ms); 0 = as soon as possible.
+    next_update_check: i64,
+    /// A newer release, if one was found.
+    update: Option<Release>,
+    /// An install is downloading.
+    updating: bool,
+    /// Result of the last install, picked up on WM_APP_UPDATED.
+    update_result: Option<Result<PathBuf, String>>,
 }
 
 struct App {
@@ -111,12 +125,15 @@ pub fn run() {
     let demo = args.iter().any(|a| a == "--demo");
     let overlay = args.iter().any(|a| a == "--overlay");
 
+    // After a self-update the previous version may still be shutting down,
+    // so wait a little for it to release the single-instance mutex.
+    let attempts = if args.iter().any(|a| a == "--after-update") { 40 } else { 1 };
+    if !single_instance(attempts) {
+        return;
+    }
+
     // SAFETY: plain Win32 calls; every pointer passed is valid for the call.
     unsafe {
-        let mutex = CreateMutexW(std::ptr::null(), 0, w!(r"Local\ClaudeTaskbarUsage"));
-        if !mutex.is_null() && GetLastError() == ERROR_ALREADY_EXISTS {
-            return;
-        }
         log::init();
         log::write(&format!("started {VERSION} (demo={demo} overlay={overlay})"));
 
@@ -157,9 +174,10 @@ pub fn run() {
         SetTimer(host, TIMER_HOUSEKEEPING, 1000, None);
 
         let cfg = Config::load();
-        let shared = Arc::new(Mutex::new(Shared::default()));
+        let shared = Arc::new(Mutex::new(Shared { check_updates: cfg.check_updates, ..Shared::default() }));
         let refresh_event = CreateEventW(std::ptr::null(), 0, 0, std::ptr::null());
         spawn_poller(shared.clone(), host as isize, refresh_event as isize, demo, &cfg);
+        spawn_updater(shared.clone(), host as isize);
 
         let app = App {
             cfg,
@@ -192,9 +210,32 @@ pub fn run() {
     }
 }
 
+/// Holds the named mutex for the life of the process; false if another
+/// instance still has it after `attempts` tries 250 ms apart.
+fn single_instance(attempts: u32) -> bool {
+    for i in 0..attempts {
+        if i > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        // SAFETY: plain mutex creation; the handle is intentionally kept open.
+        unsafe {
+            let mutex = CreateMutexW(std::ptr::null(), 0, w!(r"Local\ClaudeTaskbarUsage"));
+            if mutex.is_null() || GetLastError() != ERROR_ALREADY_EXISTS {
+                return true;
+            }
+            CloseHandle(mutex);
+        }
+    }
+    false
+}
+
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     if msg == WM_RBUTTONUP && with_app(|a| a.widget == hwnd) == Some(true) {
         show_menu();
+        return 0;
+    }
+    if msg == WM_APP_UPDATED {
+        finish_update();
         return 0;
     }
     if let Some(Some(r)) = with_app(|a| a.handle(hwnd, msg)) {
@@ -220,6 +261,38 @@ fn show_menu() {
         cmd as u32
     };
     with_app(|a| a.on_command(cmd));
+}
+
+/// Restarts into the new version, or explains why the update failed. Runs
+/// outside the app borrow because MessageBox has its own modal loop.
+fn finish_update() {
+    let Some((result, page)) = with_app(|a| {
+        let mut s = a.shared.lock().unwrap_or_else(|e| e.into_inner());
+        s.updating = false;
+        let page = s.update.as_ref().map(|r| r.page_url.clone()).unwrap_or_default();
+        (s.update_result.take(), page)
+    }) else {
+        return;
+    };
+    match result {
+        Some(Ok(exe)) => {
+            log::write("update installed, restarting");
+            if std::process::Command::new(&exe).arg("--after-update").spawn().is_ok() {
+                with_app(App::quit);
+            }
+        }
+        Some(Err(e)) => {
+            log::write(&format!("update failed: {e}"));
+            let text = wide(&format!("Couldn't install the update: {e}.\n\nThe release page will open so you can download it manually."));
+            // SAFETY: NUL-terminated strings valid for the call.
+            unsafe { MessageBoxW(std::ptr::null_mut(), text.as_ptr(), w!("Claude Taskbar Usage"), MB_OK | MB_ICONWARNING) };
+            if !page.is_empty() {
+                open(page.as_ref());
+            }
+        }
+        None => {}
+    }
+    with_app(|a| a.refresh_view(true));
 }
 
 fn cursor_x() -> i32 {
@@ -450,7 +523,18 @@ impl App {
         let now = now_ms();
         let msg = if s.last_short.is_empty() { "Claude: loading…".to_string() } else { format!("Claude: {}", s.last_short) };
         let stale = s.usage.is_some() && s.last_err.is_some() && s.last_ok.is_some_and(|t| now - t > 10 * timefmt::MINUTE);
-        let view = View { usage: s.usage.as_ref(), now, msg: &msg, stale, hover: self.hover, light, cfg: &self.cfg, locale: &self.locale };
+        let update_dot = s.update.is_some();
+        let view = View {
+            usage: s.usage.as_ref(),
+            now,
+            msg: &msg,
+            stale,
+            hover: self.hover,
+            light,
+            update_dot,
+            cfg: &self.cfg,
+            locale: &self.locale,
+        };
         let tip = self.tooltip_text(&s, now);
         let l = self.rend.layout(&view, th);
 
@@ -469,7 +553,8 @@ impl App {
         // While dragging, keep the stored offset consistent with the clamped position.
         let drag_offset = self.drag.active.then(|| (f64::from(right - l.w - x) / scale).round() as i32 - 4);
         let screen = RECT { left: x, top: tr.top, right: x + l.w, bottom: tr.bottom };
-        let key = format!("{}|{}|{}|{}|{}|{}|{}|{}", s.version, now / timefmt::MINUTE, self.hover, light, stale, msg, scale, l.w);
+        let key =
+            format!("{}|{}|{}|{}|{}|{}|{}|{}|{}", s.version, now / timefmt::MINUTE, self.hover, light, stale, update_dot, msg, scale, l.w);
         let repaint = force || !rect_eq(&screen, &self.last_rect) || key != self.last_key;
         let dc = repaint.then(|| self.rend.draw(&view, &l));
         drop(s);
@@ -553,7 +638,7 @@ impl App {
             }
         }
         if let Some(e) = &s.last_err {
-            let _ = writeln!(b, "Last update failed: {e}");
+            let _ = writeln!(b, "Last refresh failed: {e}");
         }
         if let Some(t) = s.last_ok {
             let _ = write!(b, "Updated {}", self.locale.clock(&timefmt::to_local(t, &self.locale)));
@@ -561,6 +646,11 @@ impl App {
                 b.push_str(" (demo data)");
             }
             b.push('\n');
+        }
+        if s.updating {
+            b.push_str("Installing update…\n");
+        } else if let Some(r) = &s.update {
+            let _ = writeln!(b, "Update available: v{} (right-click to install)", r.version);
         }
         b.push_str("Click to refresh · drag to move · right-click for options");
         b
@@ -588,12 +678,26 @@ impl App {
                 add(show, CMD_TOGGLE_BASE as usize + i, t.label, flags);
             }
 
+            let (update, updating) = {
+                let s = self.shared.lock().unwrap_or_else(|e| e.into_inner());
+                (s.update.as_ref().map(|r| r.version.clone()), s.updating)
+            };
+            if let Some(v) = update {
+                let (label, flags) =
+                    if updating { ("Installing update…".to_string(), MF_GRAYED) } else { (format!("Update to v{v}"), 0) };
+                add(menu, CMD_UPDATE as usize, &label, MF_STRING | flags);
+                if !updating {
+                    SetMenuDefaultItem(menu, CMD_UPDATE, 0); // bold
+                }
+                add(menu, 0, "", MF_SEPARATOR);
+            }
             add(menu, CMD_REFRESH as usize, "Refresh now", MF_STRING);
             add(menu, CMD_OPEN_USAGE as usize, "Open usage page on claude.ai", MF_STRING);
             add(menu, 0, "", MF_SEPARATOR);
             add(menu, show as usize, "Show", MF_STRING | MF_POPUP);
             add(menu, 0, "", MF_SEPARATOR);
             add(menu, CMD_AUTOSTART as usize, "Start with Windows", MF_STRING | check(autostart_enabled()));
+            add(menu, CMD_CHECK_UPDATES as usize, "Check for updates daily", MF_STRING | check(self.cfg.check_updates));
             add(menu, CMD_RESET_POS as usize, "Move back next to the tray", MF_STRING);
             add(menu, CMD_SETTINGS as usize, "Edit settings file", MF_STRING);
             add(menu, 0, "", MF_SEPARATOR);
@@ -629,8 +733,44 @@ impl App {
                 }
             }
             CMD_EXIT => self.quit(),
+            CMD_UPDATE => self.start_update(),
+            CMD_CHECK_UPDATES => {
+                self.cfg.check_updates = !self.cfg.check_updates;
+                self.save_config();
+                let mut s = self.shared.lock().unwrap_or_else(|e| e.into_inner());
+                s.check_updates = self.cfg.check_updates;
+                s.next_update_check = 0;
+                if !self.cfg.check_updates {
+                    s.update = None;
+                }
+                drop(s);
+                self.refresh_view(true);
+            }
             _ => {}
         }
+    }
+
+    /// Downloads and installs the update on a background thread; the UI
+    /// thread picks up the result in `finish_update`.
+    fn start_update(&mut self) {
+        let release = {
+            let mut s = self.shared.lock().unwrap_or_else(|e| e.into_inner());
+            if s.updating {
+                return;
+            }
+            let Some(r) = s.update.clone() else { return };
+            s.updating = true;
+            r
+        };
+        log::write(&format!("installing update v{}", release.version));
+        let (shared, host) = (self.shared.clone(), self.host as isize);
+        let _ = std::thread::Builder::new().stack_size(256 * 1024).spawn(move || {
+            let result = updater::install(&release);
+            shared.lock().unwrap_or_else(|e| e.into_inner()).update_result = Some(result);
+            // SAFETY: posting to our host window; harmless if it's gone.
+            unsafe { PostMessageW(host as HWND, WM_APP_UPDATED, 0, 0) };
+        });
+        self.refresh_view(true);
     }
 
     fn save_config(&self) {
@@ -681,6 +821,41 @@ fn set_autostart(on: bool) {
         let value = wide(&format!("\"{}\"", exe.display()));
         RegSetKeyValueW(HKEY_CURRENT_USER, RUN_KEY, RUN_VALUE, REG_SZ, value.as_ptr().cast(), (value.len() * 2) as u32);
     }
+}
+
+/// Checks for updates 30 s after start, then daily (sooner after errors).
+fn spawn_updater(shared: Arc<Mutex<Shared>>, host: isize) {
+    let _ = std::thread::Builder::new().name("updater".into()).stack_size(256 * 1024).spawn(move || {
+        let lock = || shared.lock().unwrap_or_else(|e| e.into_inner());
+        lock().next_update_check = now_ms() + 30_000;
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(15));
+            let (enabled, due) = {
+                let s = lock();
+                (s.check_updates, now_ms() >= s.next_update_check && !s.updating)
+            };
+            if !enabled || !due {
+                continue;
+            }
+            updater::cleanup_old();
+            let result = updater::check();
+            let mut s = lock();
+            match result {
+                Ok(found) => {
+                    if let Some(r) = &found {
+                        log::write(&format!("update available: v{}", r.version));
+                    }
+                    s.update = found;
+                    s.next_update_check = now_ms() + timefmt::DAY;
+                }
+                Err(()) => s.next_update_check = now_ms() + timefmt::HOUR,
+            }
+            s.version += 1;
+            drop(s);
+            // SAFETY: posting to our host window; harmless if it's gone.
+            unsafe { PostMessageW(host as HWND, WM_APP_DATA, 0, 0) };
+        }
+    });
 }
 
 // Polling thread: fetches, stores the result in `Shared`, and pokes the UI
@@ -835,7 +1010,7 @@ fn fetch(user_agent: &str) -> Result<Usage, FetchError> {
     };
     let headers = format!("Authorization: Bearer {token}\r\nContent-Type: application/json\r\nanthropic-beta: oauth-2025-04-20\r\n");
     drop(token);
-    let resp = http::get(API_HOST, API_PATH, &headers, user_agent).map_err(|()| FetchError::new("offline", "Connection error"))?;
+    let resp = http::get(USAGE_URL, &headers, user_agent, 1 << 20).map_err(|()| FetchError::new("offline", "Connection error"))?;
     match resp.status {
         200 => parse_usage(&resp.body).ok_or_else(|| FetchError::new("bad response", "Unexpected API response")),
         401 => Err(FetchError { auth: true, ..FetchError::new("login expired", "Login expired (run Claude Code once to renew it)") }),

@@ -6,6 +6,7 @@
 
 mod config;
 mod timefmt;
+mod update;
 mod usage;
 #[cfg(windows)]
 mod win;

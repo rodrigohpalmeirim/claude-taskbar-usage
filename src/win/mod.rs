@@ -5,6 +5,7 @@ mod cli;
 mod http;
 mod locale;
 mod render;
+mod updater;
 
 /// UTF-16, NUL-terminated, for Win32 `PCWSTR` parameters.
 pub fn wide(s: &str) -> Vec<u16> {

@@ -45,9 +45,12 @@ fn query_number(req: &Handle, info: u32) -> Option<u32> {
     (ok != 0).then_some(value)
 }
 
-/// `headers` are "Name: value" lines separated by CRLF. Err means a
-/// connection-level failure (DNS, TLS, timeout, offline).
-pub fn get(host: &str, path: &str, headers: &str, user_agent: &str) -> Result<Response, ()> {
+/// GETs an `https://` URL, following redirects. `headers` are "Name: value"
+/// lines separated by CRLF. The body is cut off after `max_bytes`. Err means
+/// a connection-level failure (DNS, TLS, timeout, offline) or a non-HTTPS URL.
+pub fn get(url: &str, headers: &str, user_agent: &str, max_bytes: usize) -> Result<Response, ()> {
+    let rest = url.strip_prefix("https://").ok_or(())?;
+    let (host, path) = rest.find('/').map_or((rest, "/"), |i| (&rest[..i], &rest[i..]));
     let (ua, host, path, headers) = (wide(user_agent), wide(host), wide(path), wide(headers));
     // SAFETY: all strings are NUL-terminated and outlive the calls; every
     // handle is wrapped so it is closed on every path.
@@ -84,10 +87,13 @@ pub fn get(host: &str, path: &str, headers: &str, user_agent: &str) -> Result<Re
             if WinHttpReadData(req.0, chunk.as_mut_ptr().cast(), chunk.len() as u32, &mut read) == 0 {
                 return Err(());
             }
-            if read == 0 || body.len() > 1 << 20 {
+            if read == 0 {
                 break;
             }
             body.extend_from_slice(&chunk[..read as usize]);
+            if body.len() > max_bytes {
+                return Err(());
+            }
         }
         // Wipe the bearer token from our copy of the headers.
         let mut headers = headers;
