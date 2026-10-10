@@ -6,20 +6,27 @@ on:
   pull_request:
 
 jobs:
+  # Release-identical build: cross-compiled from Linux with mingw-w64.
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
+      - run: sudo apt-get install -y -qq mingw-w64
+      - run: rustup target add x86_64-pc-windows-gnu && rustup component add clippy
       - name: Test (portable code)
-        run: go test ./...
-      - name: Vet (Windows)
-        run: GOOS=windows go vet ./...
+        run: cargo test
+      - name: Clippy
+        run: cargo clippy --release --target x86_64-pc-windows-gnu -- -D warnings
       - name: Build
-        run: ./build.sh
+        run: cargo build --release --target x86_64-pc-windows-gnu
       - uses: actions/upload-artifact@v7
         with:
           name: ClaudeTaskbarUsage-${{ github.sha }}
-          path: dist/ClaudeTaskbarUsage.exe
+          path: target/x86_64-pc-windows-gnu/release/ClaudeTaskbarUsage.exe
+
+  # All tests, including the Windows-only ones, on a real Windows machine.
+  test-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: cargo test
