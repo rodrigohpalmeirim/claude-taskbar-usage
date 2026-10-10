@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Test (portable code)
+        run: go test ./...
+      - name: Vet (Windows)
+        run: GOOS=windows go vet ./...
+      - name: Build
+        run: ./build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ClaudeTaskbarUsage-${{ github.sha }}
+          path: dist/ClaudeTaskbarUsage.exe
