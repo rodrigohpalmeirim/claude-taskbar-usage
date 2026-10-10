@@ -127,14 +127,16 @@ pub fn run() {
 
     // After a self-update the previous version may still be shutting down,
     // so wait a little for it to release the single-instance mutex.
-    let attempts = if args.iter().any(|a| a == "--after-update") { 40 } else { 1 };
+    let after_update = args.iter().any(|a| a == "--after-update");
+    let attempts = if after_update { 40 } else { 1 };
     if !single_instance(attempts) {
         return;
     }
 
     // SAFETY: plain Win32 calls; every pointer passed is valid for the call.
     unsafe {
-        log::init();
+        // After an update, keep the previous version's log lines.
+        log::init(!after_update);
         log::write(&format!("started {VERSION} (demo={demo} overlay={overlay})"));
 
         let icc = INITCOMMONCONTROLSEX { dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32, dwICC: ICC_WIN95_CLASSES };
@@ -277,7 +279,9 @@ fn finish_update() {
     match result {
         Some(Ok(exe)) => {
             log::write("update installed, restarting");
-            if std::process::Command::new(&exe).arg("--after-update").spawn().is_ok() {
+            // Keep the user's flags (e.g. --overlay) across the restart.
+            let args = std::env::args().skip(1).filter(|a| a != "--after-update");
+            if std::process::Command::new(&exe).args(args).arg("--after-update").spawn().is_ok() {
                 with_app(App::quit);
             }
         }
@@ -1032,10 +1036,14 @@ mod log {
         Some(PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("ClaudeTaskbarUsage").join("widget.log"))
     }
 
-    pub fn init() {
+    /// Creates the log file; `truncate` starts it fresh.
+    pub fn init(truncate: bool) {
         if let Some(p) = path() {
             let _ = std::fs::create_dir_all(p.parent().unwrap_or(&p));
-            let _ = std::fs::write(p, b"");
+            let _ = std::fs::OpenOptions::new().create(true).append(true).truncate(false).open(&p);
+            if truncate {
+                let _ = std::fs::write(p, b"");
+            }
         }
     }
 
