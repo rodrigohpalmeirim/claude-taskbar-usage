@@ -1,0 +1,9 @@
+# Cross-compiling from Linux/macOS: `cargo build --release --target x86_64-pc-windows-gnu`
+# (needs mingw-w64). On Windows the default MSVC target works as-is.
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-gcc"
+
+# Native Windows builds: link the C runtime statically so the exe doesn't
+# need the Visual C++ redistributable.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
