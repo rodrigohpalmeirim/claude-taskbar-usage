@@ -21,6 +21,12 @@ Inspired by [usage-monitor-for-claude](https://github.com/jens-duttke/usage-moni
 
 Get `ClaudeTaskbarUsage.exe` from the [latest release](https://github.com/rodrigohpalmeirim/claude-taskbar-usage/releases/latest). It's a single portable exe (under 0.5 MB, no installer, no runtime) that uses about 2–3 MB of private memory while running. Each release also lists the file's SHA-256.
 
+Or install it with [winget](https://learn.microsoft.com/windows/package-manager/) (pending Microsoft's review in [winget-pkgs#450307](https://github.com/microsoft/winget-pkgs/pull/450307)):
+
+```powershell
+winget install RodrigoPalmeirim.ClaudeTaskbarUsage
+```
+
 The exe is not code-signed yet, so Windows SmartScreen may show "Windows protected your PC" the first time: click **More info → Run anyway**.
 
 ## Use
@@ -102,7 +108,7 @@ Limitations: primary taskbar only; vertical taskbars aren't supported.
 
 ## Releasing
 
-Bump `version` in `Cargo.toml`, commit, and push a matching tag. The release workflow builds the exe on GitHub Actions and publishes it with its checksum:
+Bump `version` in `Cargo.toml`, commit, and push a matching tag. The release workflow builds the exe on GitHub Actions, publishes it with its checksum, and opens a pull request at [winget-pkgs](https://github.com/microsoft/winget-pkgs) for the new version (using the `WINGET_TOKEN` secret and the `rodrigohpalmeirim/winget-pkgs` fork):
 
 ```sh
 git tag v0.2.0 && git push origin v0.2.0

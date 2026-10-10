@@ -31,3 +31,17 @@ jobs:
           sha256sum ClaudeTaskbarUsage.exe > ClaudeTaskbarUsage.exe.sha256
           gh release create "$GITHUB_REF_NAME" ClaudeTaskbarUsage.exe ClaudeTaskbarUsage.exe.sha256 \
             --title "$GITHUB_REF_NAME" --generate-notes
+
+  # Opens a pull request at microsoft/winget-pkgs for the new version, from
+  # the fork rodrigohpalmeirim/winget-pkgs. WINGET_TOKEN is a classic PAT
+  # with public_repo + workflow scopes. Pinned to a commit because the action
+  # receives that token.
+  winget:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: vedantmgoyal9/winget-releaser@f29ed1ffd34f91223a2aebaa71beaab0901ff9fd # v2
+        with:
+          identifier: RodrigoPalmeirim.ClaudeTaskbarUsage
+          installers-regex: '\.exe$'
+          token: ${{ secrets.WINGET_TOKEN }}
