@@ -9,8 +9,8 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
       - name: Test (portable code)
@@ -19,7 +19,7 @@ jobs:
         run: GOOS=windows go vet ./...
       - name: Build
         run: ./build.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ClaudeTaskbarUsage-${{ github.sha }}
           path: dist/ClaudeTaskbarUsage.exe
